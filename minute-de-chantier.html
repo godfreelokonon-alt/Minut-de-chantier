@@ -1,0 +1,1935 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#f4f7fa">
+<meta name="description" content="Fiche de minuté de chantier — suivi des opérations sur le terrain, export PDF, partage d'équipe par QR code.">
+<title>Minuté de chantier</title>
+
+<!-- Favicon SVG inline (pas de requête externe) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23047857'%3E%3Ccircle cx='12' cy='13' r='8' fill='none' stroke='%23047857' stroke-width='2.5'/%3E%3Cpath d='M12 9v4l2 2' fill='none' stroke='%23047857' stroke-width='2.5' stroke-linecap='round'/%3E%3Cpath d='M9 2h6' fill='none' stroke='%23047857' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+
+<style>
+/* =============================================================================
+   MINUTÉ DE CHANTIER — v3
+   Corrections depuis v2 :
+   - Entrée/Blur valident les champs texte proprement
+   - confirm() natif remplacé par modale custom
+   - atob/btoa remplacés par TextEncoder/Decoder UTF-8 safe
+   - localStorage avec feedback d'erreur visible
+   - Gestion minuit renforcée (détection via deltaH, pas via comparaison ts)
+   - QR code inliné (lib qrcode-generator intégrée, pas de CDN)
+   - QR code exporté en PNG (canvas, pas GIF)
+   - Option "Ne partager que les tâches" (sans infos chantier)
+   - Fusion vs Remplacement à l'import
+   - aria-label sur tous les boutons icône
+   - Refonte mobile portrait (testé à 360px)
+   - Plus de polluants globals (IIFE + closures)
+   ========================================================================== */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #f4f7fa;
+  --bg-halo-1:  #dceef1;
+  --bg-halo-2:  #e6edf7;
+  --paper:      rgba(255, 255, 255, 0.75);
+  --paper-hi:   rgba(255, 255, 255, 0.92);
+  --ink:        #0f172a;
+  --ink-soft:   #334155;
+  --ink-mute:   #64748b;
+  --ink-ghost:  #94a3b8;
+  --rule:       #cfd8e3;
+  --rule-soft:  #e2e8f0;
+  --accent:     #047857;
+  --accent-hi:  #10b981;
+  --accent-bg:  #ecfdf5;
+  --warn:       #b45309;
+  --warn-bg:    #fffbeb;
+  --danger:     #b91c1c;
+  --danger-bg:  #fef2f2;
+  --danger-br:  #fca5a5;
+  --next-bg:    #eff6ff;
+  --next-br:    #93c5fd;
+  --next-ink:   #1d4ed8;
+
+  --radius:     10px;
+  --radius-sm:  6px;
+  --shadow:     0 1px 2px rgba(15, 23, 42, 0.04),
+                0 8px 24px -12px rgba(15, 23, 42, 0.12);
+  --shadow-soft: 0 1px 0 rgba(15, 23, 42, 0.04);
+
+  --font-ui:    -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono:  ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+html, body {
+  font-family: var(--font-ui);
+  font-variant-numeric: lining-nums;  /* zéro non barré */
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.5;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  /* Évite le zoom iOS sur focus input */
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Les inputs doivent rester ≥16px sur iOS pour éviter le zoom automatique */
+input, textarea, select, button { font-size: 16px; }
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 10% 0%, var(--bg-halo-1) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 50% at 100% 20%, var(--bg-halo-2) 0%, transparent 55%),
+    radial-gradient(ellipse 40% 30% at 50% 100%, #e4f1eb 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ─── HEADER ─── */
+header {
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(244, 247, 250, 0.85);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--rule-soft);
+}
+.header-inner {
+  max-width: 900px; margin: 0 auto;
+  padding: 10px 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.logo {
+  width: 36px; height: 36px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-hi) 100%);
+  display: flex; align-items: center; justify-content: center;
+  color: white;
+  box-shadow: 0 4px 12px -2px rgba(4, 120, 87, 0.35);
+  flex-shrink: 0;
+}
+.brand {
+  flex: 1; min-width: 0;
+}
+.brand-label {
+  font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--ink-mute);
+  font-weight: 600;
+  line-height: 1.2;
+}
+.brand-title {
+  font-size: 16px; font-weight: 700;
+  color: var(--ink);
+  line-height: 1.25;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.saved-tag {
+  font: 500 10px/1.2 var(--font-mono);
+  color: var(--ink-ghost);
+  margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.saved-tag.error { color: var(--danger); font-weight: 600; }
+.incident-btn {
+  background: white;
+  border: 1px solid var(--danger-br);
+  color: var(--danger);
+  padding: 0 12px;
+  height: 40px;
+  min-width: 40px;
+  border-radius: 8px;
+  font-weight: 600; font-size: 14px;
+  display: flex; align-items: center; gap: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.incident-btn:hover { background: var(--danger-bg); border-color: var(--danger); }
+.incident-btn:active { transform: scale(0.97); }
+@media (max-width: 420px) {
+  .incident-btn .lbl { display: none; }
+  .incident-btn { padding: 0 10px; }
+}
+
+/* ─── MAIN ─── */
+main {
+  position: relative; z-index: 1;
+  max-width: 900px; margin: 0 auto;
+  padding: 14px 14px 110px 14px;
+}
+
+/* ─── FICHE CHANTIER ─── */
+.fiche {
+  background: var(--paper);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.fiche-titre {
+  padding: 10px 14px;
+  background: linear-gradient(180deg, #ffffff 0%, rgba(255,255,255,0.6) 100%);
+  border-bottom: 1px solid var(--rule-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-mute);
+  display: flex; align-items: center; gap: 8px;
+}
+.fiche-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+@media (min-width: 640px) {
+  .fiche-grid { grid-template-columns: repeat(3, 1fr); }
+}
+.champ {
+  padding: 10px 12px;
+  border-right: 1px solid var(--rule-soft);
+  border-bottom: 1px solid var(--rule-soft);
+  min-height: 58px;
+  display: flex; flex-direction: column; justify-content: center;
+  min-width: 0; /* évite les débordements */
+}
+.champ:nth-child(2n) { border-right: none; }
+@media (min-width: 640px) {
+  .champ:nth-child(2n) { border-right: 1px solid var(--rule-soft); }
+  .champ:nth-child(3n) { border-right: none; }
+}
+.champ-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-mute);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.champ input {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  padding: 0;
+  font-family: inherit;
+  min-width: 0;
+}
+.champ input::placeholder { color: var(--ink-ghost); font-weight: 400; }
+
+/* ─── KPI ─── */
+.kpis {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.kpi {
+  background: var(--paper);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  min-width: 0;
+}
+.kpi-val {
+  font: 600 20px/1 var(--font-mono);
+  color: var(--ink);
+}
+.kpi-val.accent { color: var(--accent); }
+.kpi-val.warn   { color: var(--warn); }
+.kpi-val.danger { color: var(--danger); }
+.kpi-label {
+  font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--ink-mute); font-weight: 600;
+  margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ─── SECTION ─── */
+.section-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 0 4px;
+  margin: 18px 0 8px 0;
+}
+.section-title {
+  font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--ink-mute);
+  font-weight: 700;
+}
+.section-count {
+  font: 500 12px/1 var(--font-mono);
+  color: var(--ink-ghost);
+}
+
+/* ─── TÂCHES ─── */
+.taches { display: flex; flex-direction: column; }
+
+.tache {
+  background: var(--paper);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  box-shadow: var(--shadow-soft);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  overflow: hidden;
+  position: relative;
+}
+.tache.en-cours {
+  background: linear-gradient(180deg, #ffffff 0%, var(--accent-bg) 120%);
+  border-color: var(--accent-hi);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1), var(--shadow-soft);
+}
+.tache.finie { opacity: 0.82; }
+.tache.prochaine {
+  border-color: var(--next-br);
+  box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.25), var(--shadow-soft);
+}
+.tache.ghost { opacity: 0.35; }
+.tache.drop-before { box-shadow: 0 -3px 0 0 var(--accent), var(--shadow-soft); }
+.tache.drop-after  { box-shadow: 0 3px 0 0 var(--accent), var(--shadow-soft); }
+
+/* Ligne d'en-tête : handle + nom + bouton supprimer (badge passe en 2e ligne sur mobile) */
+.tache-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 8px 8px 4px;
+  border-bottom: 1px solid var(--rule-soft);
+  min-width: 0;
+}
+.handle {
+  width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-ghost);
+  cursor: grab;
+  border-radius: 6px;
+  flex-shrink: 0;
+  touch-action: none;
+  user-select: none; -webkit-user-select: none;
+}
+.handle:hover { background: var(--rule-soft); color: var(--ink-soft); }
+.handle.dragging { cursor: grabbing; background: var(--accent-bg); color: var(--accent); }
+.tache-num {
+  font: 600 12px/1 var(--font-mono);
+  color: var(--ink-ghost);
+  width: 18px; text-align: right;
+  flex-shrink: 0;
+}
+.tache-nom {
+  flex: 1; min-width: 0;
+  font-size: 15px; font-weight: 600; line-height: 1.3;
+  color: var(--ink);
+  background: transparent;
+  border: none; outline: none;
+  padding: 4px 0;
+  font-family: inherit;
+}
+.tache-nom:focus { color: var(--accent); }
+.tache-nom::placeholder { color: var(--ink-ghost); font-style: italic; font-weight: 500; }
+
+.badge {
+  font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.badge.attente   { background: #f1f5f9; color: var(--ink-mute); }
+.badge.encours   { background: var(--accent-bg); color: var(--accent); }
+.badge.finie     { background: #f1f5f9; color: var(--ink-mute); }
+.badge.prochaine { background: var(--next-bg); color: var(--next-ink); }
+
+.icon-btn {
+  width: 40px; height: 40px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--ink-mute);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.icon-btn:hover { background: var(--rule-soft); color: var(--ink); }
+.icon-btn.danger:hover { background: var(--danger-bg); color: var(--danger); }
+
+/* ─── COLONNES HORAIRES ─── */
+.tache-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.col {
+  padding: 8px 10px;
+  border-right: 1px solid var(--rule-soft);
+  min-height: 56px;
+  display: flex; flex-direction: column; justify-content: center;
+  min-width: 0;
+}
+.col:last-child { border-right: none; }
+.col-label {
+  font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink-mute);
+  margin-bottom: 2px;
+}
+.col-val {
+  font: 600 16px/1 var(--font-mono);
+  color: var(--ink);
+}
+.col-val.empty { color: var(--ink-ghost); font-weight: 400; }
+.col-val.accent { color: var(--accent); }
+.col-val.warn { color: var(--warn); }
+.col-val.danger { color: var(--danger); }
+.col input[type="time"] {
+  font: 600 16px/1 var(--font-mono);
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  min-width: 0;
+}
+
+/* ─── ACTIONS TÂCHE ─── */
+.tache-actions {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  padding: 10px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.btn {
+  min-height: 44px;
+  padding: 0 14px;
+  font: 600 14px/1 var(--font-ui);
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  transition: background 0.15s, transform 0.1s;
+  background: white;
+  white-space: nowrap;
+  min-width: 0;
+}
+.btn:active { transform: scale(0.97); }
+.btn.primary {
+  flex: 1;
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px -2px rgba(4, 120, 87, 0.4);
+}
+.btn.primary:hover { background: #065f46; }
+.btn.warn {
+  flex: 1;
+  background: #f59e0b;
+  color: white;
+  border-color: #f59e0b;
+  box-shadow: 0 2px 8px -2px rgba(245, 158, 11, 0.4);
+}
+.btn.warn:hover { background: #d97706; }
+.btn.ghost {
+  background: white;
+  color: var(--ink-soft);
+  border-color: var(--rule);
+}
+.btn.ghost:hover { background: var(--rule-soft); }
+.btn.next {
+  flex: 1;
+  background: var(--next-bg);
+  color: var(--next-ink);
+  border-color: var(--next-br);
+}
+.btn.next:hover { background: #dbeafe; }
+.btn.danger {
+  background: var(--danger);
+  color: white;
+  border-color: var(--danger);
+  box-shadow: 0 2px 8px -2px rgba(185, 28, 28, 0.4);
+}
+.btn.danger:hover { background: #991b1b; }
+
+/* ─── COMMENTAIRE ─── */
+.tache-comm {
+  padding: 8px 12px;
+}
+.tache-comm textarea {
+  width: 100%;
+  font: 400 14px/1.45 var(--font-ui);
+  color: var(--ink);
+  background: transparent;
+  border: none; outline: none;
+  padding: 4px 0;
+  resize: none;
+  min-height: 22px;
+  font-family: var(--font-ui);
+}
+.tache-comm textarea::placeholder { color: var(--ink-ghost); font-style: italic; }
+
+/* ─── ALERTE durée négative ─── */
+.tache-alert {
+  background: var(--warn-bg);
+  border-top: 1px solid #fcd34d;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--warn);
+  display: flex; align-items: center; gap: 6px;
+  line-height: 1.4;
+}
+
+/* ─── AJOUT ─── */
+.add-row {
+  width: 100%;
+  min-height: 52px;
+  border: 1.5px dashed var(--rule);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-mute);
+  font: 600 14px/1 var(--font-ui);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  transition: all 0.15s;
+  margin-top: 8px;
+}
+.add-row:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* ─── INCIDENTS ─── */
+.incidents {
+  background: var(--paper);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--danger-br);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-soft);
+  margin-bottom: 16px;
+}
+.incidents-head {
+  padding: 10px 14px;
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-br);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--danger);
+  display: flex; align-items: center; gap: 8px;
+}
+.incident-ligne {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 8px 10px 14px;
+  border-bottom: 1px solid var(--rule-soft);
+  min-width: 0;
+}
+.incident-ligne:last-child { border-bottom: none; }
+.incident-time {
+  font: 600 13px/1.4 var(--font-mono);
+  color: var(--danger);
+  padding-top: 2px;
+  background: transparent;
+  border: none; outline: none;
+  width: 72px; flex-shrink: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+.incident-texte {
+  flex: 1;
+  font: 500 14px/1.4 var(--font-ui);
+  color: var(--ink);
+  background: transparent;
+  border: none; outline: none;
+  padding-top: 1px;
+  font-family: inherit;
+  min-width: 0;
+}
+
+/* ─── EMPTY ─── */
+.empty {
+  background: var(--paper);
+  border: 1.5px dashed var(--rule);
+  border-radius: var(--radius);
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--ink-mute);
+}
+.empty p { margin-bottom: 12px; font-size: 14px; }
+
+/* ─── BARRE BAS ─── */
+.bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  z-index: 15;
+  background: rgba(244, 247, 250, 0.92);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-top: 1px solid var(--rule-soft);
+  padding: 8px 10px;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+}
+.bar-inner {
+  max-width: 900px; margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.bar .btn {
+  padding: 0 6px;
+  font-size: 12px;
+  min-height: 48px;
+  gap: 4px;
+}
+.bar .btn svg { flex-shrink: 0; }
+/* Sur écrans larges, on montre les labels pleins */
+@media (min-width: 520px) {
+  .bar .btn { font-size: 13px; padding: 0 10px; gap: 6px; }
+}
+/* Sur très petit mobile, icônes seules + label en dessous */
+@media (max-width: 380px) {
+  .bar .btn {
+    flex-direction: column;
+    gap: 2px;
+    font-size: 10.5px;
+    min-height: 52px;
+    letter-spacing: 0;
+  }
+}
+
+/* ─── MODALE ─── */
+.modal-back {
+  position: fixed; inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 50;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 14px;
+}
+@media (min-width: 640px) { .modal-back { align-items: center; } }
+.modal {
+  background: white;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 48px -8px rgba(15, 23, 42, 0.25);
+  width: 100%; max-width: 500px;
+  padding: 18px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-title {
+  font-size: 16px; font-weight: 700;
+  color: var(--ink);
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 4px;
+}
+.modal-sub {
+  font-size: 13px;
+  color: var(--ink-mute);
+  margin-bottom: 12px;
+  line-height: 1.45;
+}
+.modal textarea, .modal input[type="text"] {
+  width: 100%;
+  font: 400 16px/1.5 var(--font-ui);
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+  outline: none;
+  background: #fafafa;
+  font-family: var(--font-ui);
+}
+.modal textarea { min-height: 90px; }
+.modal textarea:focus, .modal input[type="text"]:focus {
+  border-color: var(--accent); background: white;
+}
+.modal textarea.danger-focus:focus { border-color: var(--danger); }
+.modal-btns {
+  display: flex; gap: 8px; margin-top: 12px;
+  flex-wrap: wrap;
+}
+.modal-btns .btn { flex: 1; min-width: 90px; }
+
+.qr-wrap {
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+  background: white;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  margin: 10px 0;
+}
+.qr-wrap canvas {
+  display: block;
+  width: 100%; max-width: 260px;
+  height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+.qr-url {
+  font: 400 10.5px/1.4 var(--font-mono);
+  color: var(--ink-mute);
+  word-break: break-all;
+  background: #f8fafc;
+  border: 1px solid var(--rule-soft);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  max-height: 60px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+}
+
+.toggle-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 0;
+  font-size: 13px;
+}
+.toggle-row input[type="checkbox"] {
+  width: 18px; height: 18px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.tip {
+  background: var(--next-bg);
+  border: 1px solid var(--next-br);
+  color: var(--next-ink);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 10px 0;
+}
+.tip.warn {
+  background: var(--warn-bg);
+  border-color: #fcd34d;
+  color: var(--warn);
+}
+
+/* ─── Toast ─── */
+.toast {
+  position: fixed; bottom: 90px; left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--ink);
+  color: white;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.25s;
+  z-index: 40;
+  max-width: 90vw;
+  text-align: center;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.danger { background: var(--danger); }
+
+/* ─── IMPRESSION ─── */
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body, html {
+    background: white !important;
+    color: black !important;
+    font-size: 10.5pt;
+  }
+  body::before { display: none; }
+  header, .bar, .incident-btn, .handle, .icon-btn,
+  .tache-actions, .add-row, .modal-back, .toast {
+    display: none !important;
+  }
+  main { padding: 0; max-width: none; }
+
+  .print-header {
+    display: block !important;
+    border-bottom: 2px solid black;
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+  }
+  .print-header h1 { font-size: 16pt; margin-bottom: 2px; }
+  .print-header .sub { font-size: 9.5pt; color: #333; }
+
+  .fiche, .incidents, .tache {
+    background: white !important;
+    border: 1px solid #333 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .fiche-titre, .incidents-head, .col-label, .champ-label, .kpi-label,
+  .col-val, .col-val.accent, .col-val.warn, .col-val.danger, .col-val.empty {
+    color: black !important;
+  }
+  .tache { margin-bottom: 6px; }
+  .tache.en-cours, .tache.finie, .tache.prochaine { background: white !important; }
+  .kpis { grid-template-columns: repeat(4, 1fr) !important; margin-bottom: 10px; }
+  .kpi-val { color: black !important; }
+  .col input[type="time"], .incident-time, .tache-nom, .tache-comm textarea {
+    color: black !important;
+  }
+  .tache-alert { display: none !important; }
+  .badge {
+    background: white !important;
+    color: black !important;
+    border: 1px solid #333;
+  }
+
+  .print-footer {
+    display: block !important;
+    margin-top: 20px;
+    padding-top: 10px;
+    border-top: 2px solid black;
+    font-size: 9.5pt;
+  }
+  .print-footer-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 30px;
+  }
+  .signature-block .label { margin-bottom: 30px; }
+}
+.print-header, .print-footer { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M9 2h6"/>
+      </svg>
+    </div>
+    <div class="brand">
+      <div class="brand-label">Fiche de chantier</div>
+      <div class="brand-title" id="brand-title">Minuté de chantier</div>
+      <div class="saved-tag" id="saved-tag"></div>
+    </div>
+    <button class="incident-btn" id="btn-incident" aria-label="Déclarer un incident">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 9v4"/><path d="M12 17h.01"/>
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      </svg>
+      <span class="lbl">Incident</span>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div class="print-header">
+    <h1>Minuté de chantier</h1>
+    <div class="sub">Fiche de suivi des opérations — édité le <span id="print-date"></span></div>
+  </div>
+
+  <div class="fiche">
+    <div class="fiche-titre">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/>
+      </svg>
+      Identification du chantier
+    </div>
+    <div class="fiche-grid" id="fiche-grid"></div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="kpi-val" id="k-total">0</div><div class="kpi-label">Tâches</div></div>
+    <div class="kpi"><div class="kpi-val accent" id="k-cours">0</div><div class="kpi-label">En cours</div></div>
+    <div class="kpi"><div class="kpi-val" id="k-finies">0</div><div class="kpi-label">Finies</div></div>
+    <div class="kpi"><div class="kpi-val" id="k-inc">0</div><div class="kpi-label">Incidents</div></div>
+  </div>
+
+  <div class="section-head">
+    <div class="section-title">Opérations</div>
+    <div class="section-count" id="count-op"></div>
+  </div>
+  <div class="taches" id="taches"></div>
+  <button class="add-row" id="btn-add" aria-label="Ajouter une tâche">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 5v14"/><path d="M5 12h14"/>
+    </svg>
+    Ajouter une tâche
+  </button>
+
+  <div id="incidents-section" style="display:none; margin-top: 18px;"></div>
+
+  <div class="print-footer">
+    <div class="print-footer-grid">
+      <div class="signature-block">
+        <div class="label">Responsable : <span id="print-resp"></span></div>
+        <div>Signature :</div>
+      </div>
+      <div class="signature-block" style="text-align: right;">
+        <div class="label">Visa hiérarchie :</div>
+        <div>Signature :</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div class="bar">
+  <div class="bar-inner">
+    <button class="btn ghost" id="btn-share" aria-label="Partager le plan à l'équipe">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+      </svg>
+      Partager
+    </button>
+    <button class="btn ghost" id="btn-save" aria-label="Exporter en fichier JSON">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+      </svg>
+      Exporter
+    </button>
+    <button class="btn ghost" id="btn-open" aria-label="Ouvrir un fichier JSON">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      Ouvrir
+    </button>
+    <input type="file" id="file-input" accept=".json" style="display:none">
+    <button class="btn primary" id="btn-pdf" aria-label="Exporter en PDF">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="6 9 6 2 18 2 18 9"/>
+        <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+        <rect x="6" y="14" width="12" height="8"/>
+      </svg>
+      PDF
+    </button>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  MODALES — déclarées vides, populées dynamiquement (évite doublons DOM)  -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="modal-back" id="modal-host" style="display:none" role="dialog" aria-modal="true"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  BIBLIOTHÈQUE QR CODE                                                    -->
+<!--  Chargée depuis CDN (mise en cache par le navigateur au 1er chargement, -->
+<!--  donc disponible offline ensuite). Si l'hôte est offline au 1er accès,  -->
+<!--  l'app reste fonctionnelle mais propose uniquement le lien texte.       -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"
+        onerror="window.__qrLoadFailed = true"></script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!--  SCRIPT PRINCIPAL                                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+'use strict';
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  WRAPPER QR — encapsule la lib externe avec fallback
+ * ════════════════════════════════════════════════════════════════════════ */
+const QR = {
+  available() {
+    return typeof window.qrcode === "function" && !window.__qrLoadFailed;
+  },
+  /**
+   * Génère un QR sur un canvas existant.
+   * Retourne true en cas de succès, false si impossible.
+   * Utilise la correction L (max de capacité) et la détection auto de version.
+   */
+  draw(canvas, text, cellSize = 6, margin = 4) {
+    if (!this.available()) return false;
+    try {
+      // typeNumber=0 = auto, errorCorrectLevel='L' = maxi capacité
+      const qr = window.qrcode(0, 'L');
+      qr.addData(text);
+      qr.make();
+      const n = qr.getModuleCount();
+      const total = (n + margin * 2) * cellSize;
+      canvas.width = total;
+      canvas.height = total;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, total, total);
+      ctx.fillStyle = 'black';
+      for (let r = 0; r < n; r++) {
+        for (let c = 0; c < n; c++) {
+          if (qr.isDark(r, c)) {
+            ctx.fillRect((c + margin) * cellSize, (r + margin) * cellSize, cellSize, cellSize);
+          }
+        }
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+};
+
+
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  ÉTAT + LOCALSTORAGE
+ * ════════════════════════════════════════════════════════════════════════ */
+const STORAGE_KEY = "minute-chantier-v3";
+let storageOK = true;
+
+const state = {
+  chantier: {
+    nom: "", itc: "", lieu: "", resp: "", equipe: "",
+    date: new Date().toISOString().slice(0, 10),
+  },
+  taches: [],
+  incidents: [],
+  lastSaved: null,
+};
+
+function sauvegardeAuto() {
+  try {
+    state.lastSaved = Date.now();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    storageOK = true;
+    majSavedTag();
+  } catch (e) {
+    storageOK = false;
+    majSavedTag();
+  }
+}
+
+function chargerAuto() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (d && typeof d === "object") {
+      if (d.chantier) Object.assign(state.chantier, validateChantier(d.chantier));
+      state.taches = Array.isArray(d.taches) ? d.taches.map(validateTache).filter(Boolean) : [];
+      state.incidents = Array.isArray(d.incidents) ? d.incidents.map(validateIncident).filter(Boolean) : [];
+      state.lastSaved = d.lastSaved || null;
+    }
+  } catch {}
+}
+
+// Validation robuste des données chargées (JSON bricolé, ancien format, etc.)
+function validateChantier(c) {
+  if (!c || typeof c !== "object") return {};
+  const out = {};
+  ["nom", "itc", "lieu", "resp", "equipe", "date"].forEach((k) => {
+    out[k] = typeof c[k] === "string" ? c[k] : "";
+  });
+  return out;
+}
+function validateTache(t) {
+  if (!t || typeof t !== "object") return null;
+  return {
+    id: typeof t.id === "string" ? t.id : uid(),
+    nom: typeof t.nom === "string" ? t.nom : "",
+    debut: typeof t.debut === "number" ? t.debut : null,
+    fin: typeof t.fin === "number" ? t.fin : null,
+    commentaire: typeof t.commentaire === "string" ? t.commentaire : "",
+  };
+}
+function validateIncident(i) {
+  if (!i || typeof i !== "object" || typeof i.ts !== "number") return null;
+  return {
+    id: typeof i.id === "string" ? i.id : uid(),
+    ts: i.ts,
+    texte: typeof i.texte === "string" ? i.texte : "",
+  };
+}
+
+function majSavedTag() {
+  const el = document.getElementById("saved-tag");
+  if (!storageOK) {
+    el.textContent = "⚠ Sauvegarde navigateur indisponible — pensez à exporter";
+    el.classList.add("error");
+    return;
+  }
+  el.classList.remove("error");
+  if (!state.lastSaved) { el.textContent = ""; return; }
+  const d = new Date(state.lastSaved);
+  el.textContent = `Sauvegardé · ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  HELPERS
+ * ════════════════════════════════════════════════════════════════════════ */
+const pad = (n) => String(n).padStart(2, "0");
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+function fmtHM(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function fmtHMS(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function fmtDuree(ms) {
+  if (ms == null || isNaN(ms) || ms < 0) return "";
+  const min = Math.round(ms / 60000);
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h}h${pad(m)}` : `${m} min`;
+}
+
+/**
+ * Applique "HH:MM" à la date du timestamp existant (conserve le jour).
+ * Si pas de baseTs, utilise aujourd'hui à la même heure.
+ */
+function hmToTs(hhmm, baseTs) {
+  if (!/^\d{2}:\d{2}$/.test(hhmm)) return null;
+  const [h, m] = hhmm.split(":").map(Number);
+  const d = baseTs ? new Date(baseTs) : new Date();
+  d.setHours(h, m, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * Ajuste la date de "fin" quand on saisit une heure manuellement après
+ * un début qui a traversé minuit. Principe : la durée d'une opération
+ * ITC est réaliste (entre 1 min et 8h max). Si la saisie donne une durée
+ * négative mais qu'ajouter 24h la ramène dans une fenêtre crédible, on le fait.
+ */
+function ajusterSiTraverseMinuit(debutTs, finTs) {
+  if (!debutTs || !finTs) return finTs;
+  const delta = finTs - debutTs;
+  if (delta >= 0) return finTs;
+  // Essaie d'ajouter 24h — fenêtre crédible = entre 0 et 20h
+  const corrigé = finTs + 24 * 60 * 60 * 1000;
+  const deltaCorr = corrigé - debutTs;
+  if (deltaCorr >= 0 && deltaCorr <= 20 * 60 * 60 * 1000) return corrigé;
+  return finTs;
+}
+
+function echap(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[c]);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  TOAST
+ * ════════════════════════════════════════════════════════════════════════ */
+let toastTimer = null;
+function toast(msg, opts = {}) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.toggle("danger", !!opts.danger);
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), opts.duration || 2400);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  MODALE custom (remplace confirm/alert)
+ * ════════════════════════════════════════════════════════════════════════ */
+const modalHost = document.getElementById("modal-host");
+
+function openModal(html, opts = {}) {
+  modalHost.innerHTML = `<div class="modal" role="document">${html}</div>`;
+  modalHost.style.display = "flex";
+  const onBackClick = (e) => { if (e.target === modalHost) closeModal(); };
+  modalHost.addEventListener("click", onBackClick);
+  modalHost._onBackClick = onBackClick;
+  // Focus auto sur premier input ou bouton primary
+  setTimeout(() => {
+    const focusEl = modalHost.querySelector("[autofocus], textarea, input[type='text'], .btn.primary");
+    focusEl?.focus();
+  }, 60);
+}
+
+function closeModal() {
+  modalHost.style.display = "none";
+  if (modalHost._onBackClick) {
+    modalHost.removeEventListener("click", modalHost._onBackClick);
+    delete modalHost._onBackClick;
+  }
+  modalHost.innerHTML = "";
+}
+
+function confirmCustom(titre, texte, opts = {}) {
+  return new Promise((resolve) => {
+    const labelOk = opts.labelOk || "Confirmer";
+    const labelKo = opts.labelKo || "Annuler";
+    const danger = opts.danger ? "danger" : "primary";
+    openModal(`
+      <div class="modal-title">${echap(titre)}</div>
+      <div class="modal-sub">${echap(texte)}</div>
+      <div class="modal-btns">
+        <button class="btn ghost" data-a="ko">${echap(labelKo)}</button>
+        <button class="btn ${danger}" data-a="ok">${echap(labelOk)}</button>
+      </div>
+    `);
+    modalHost.querySelector('[data-a="ko"]').onclick = () => { closeModal(); resolve(false); };
+    modalHost.querySelector('[data-a="ok"]').onclick = () => { closeModal(); resolve(true); };
+  });
+}
+
+function alertCustom(titre, texte) {
+  return new Promise((resolve) => {
+    openModal(`
+      <div class="modal-title">${echap(titre)}</div>
+      <div class="modal-sub">${echap(texte)}</div>
+      <div class="modal-btns">
+        <button class="btn primary" data-a="ok">OK</button>
+      </div>
+    `);
+    modalHost.querySelector('[data-a="ok"]').onclick = () => { closeModal(); resolve(); };
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  FICHE CHANTIER — rendu statique
+ * ════════════════════════════════════════════════════════════════════════ */
+const CHAMPS = [
+  { k: "nom",    label: "Nom du chantier",     ph: "Ex : Renouvellement voie L7" },
+  { k: "itc",    label: "N° ITC",              ph: "2025-…" },
+  { k: "lieu",   label: "Lieu / PK",           ph: "Ex : Châtelet — PK 12+400" },
+  { k: "resp",   label: "Responsable",         ph: "Nom Prénom" },
+  { k: "date",   label: "Date",                ph: "", type: "date" },
+  { k: "equipe", label: "Équipe",              ph: "Optionnel" },
+];
+
+function renderFiche() {
+  const fg = document.getElementById("fiche-grid");
+  fg.innerHTML = CHAMPS.map((c) => `
+    <label class="champ">
+      <span class="champ-label">${echap(c.label)}</span>
+      <input data-k="${c.k}" type="${c.type || 'text'}"
+             value="${echap(state.chantier[c.k] || '')}"
+             placeholder="${echap(c.ph)}"
+             aria-label="${echap(c.label)}">
+    </label>
+  `).join("");
+
+  fg.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const k = e.target.dataset.k;
+      state.chantier[k] = e.target.value;
+      if (k === "nom") {
+        document.getElementById("brand-title").textContent =
+          e.target.value || "Minuté de chantier";
+      }
+      if (k === "resp") {
+        document.getElementById("print-resp").textContent = e.target.value;
+      }
+      sauvegardeAuto();
+    });
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  TÂCHES
+ * ════════════════════════════════════════════════════════════════════════ */
+function ajouterTache(nom = "", focusNom = false) {
+  const t = { id: uid(), nom, debut: null, fin: null, commentaire: "" };
+  state.taches.push(t);
+  render();
+  sauvegardeAuto();
+  if (focusNom) {
+    setTimeout(() => {
+      const el = document.querySelector(`[data-tid="${t.id}"] .tache-nom`);
+      if (el) { el.focus(); el.select?.(); }
+    }, 30);
+  }
+}
+
+async function supprimerTache(id) {
+  const t = state.taches.find((x) => x.id === id);
+  if (!t) return;
+  const ok = await confirmCustom(
+    "Supprimer cette tâche ?",
+    t.nom ? `« ${t.nom} » sera effacée.` : "La tâche sera effacée.",
+    { labelOk: "Supprimer", danger: true }
+  );
+  if (!ok) return;
+  state.taches = state.taches.filter((x) => x.id !== id);
+  render();
+  sauvegardeAuto();
+}
+
+function demarrer(id) {
+  const t = state.taches.find((x) => x.id === id);
+  if (!t) return;
+  t.debut = Date.now();
+  render();
+  sauvegardeAuto();
+}
+
+function terminer(id) {
+  const t = state.taches.find((x) => x.id === id);
+  if (!t || !t.debut) return;
+  t.fin = Date.now();
+  render();
+  sauvegardeAuto();
+}
+
+function demarrerProchaine() {
+  const p = trouverProchaine();
+  if (p) demarrer(p.id);
+}
+
+function trouverProchaine() {
+  return state.taches.find((t) => !t.debut) || null;
+}
+
+async function effacerHoraires(id) {
+  const ok = await confirmCustom(
+    "Effacer les horaires ?",
+    "Les heures de début et fin seront remises à vide. Le nom et le commentaire sont conservés.",
+    { labelOk: "Effacer", danger: true }
+  );
+  if (!ok) return;
+  const t = state.taches.find((x) => x.id === id);
+  if (!t) return;
+  t.debut = null; t.fin = null;
+  render();
+  sauvegardeAuto();
+}
+
+// Pas de render → préserve focus et curseur dans les inputs texte
+function majTexte(id, champ, val) {
+  const t = state.taches.find((x) => x.id === id);
+  if (!t) return;
+  t[champ] = val;
+  sauvegardeAuto();
+}
+
+function setHeure(id, champ, hhmm) {
+  const t = state.taches.find((x) => x.id === id);
+  if (!t) return;
+  let ts = hmToTs(hhmm, t[champ]);
+  if (!ts) return;
+  if (champ === "fin" && t.debut) {
+    ts = ajusterSiTraverseMinuit(t.debut, ts);
+  }
+  t[champ] = ts;
+  render();
+  sauvegardeAuto();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  DRAG & DROP — Pointer Events
+ * ════════════════════════════════════════════════════════════════════════ */
+let drag = null;
+
+function onHandleDown(e, id) {
+  e.preventDefault();
+  const tacheEl = document.querySelector(`[data-tid="${id}"]`);
+  if (!tacheEl) return;
+  drag = { id, currentOverId: null, currentPos: null };
+  tacheEl.classList.add("ghost");
+  e.target.closest(".handle")?.classList.add("dragging");
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp, { once: true });
+  document.addEventListener("pointercancel", onPointerUp, { once: true });
+}
+
+function onPointerMove(e) {
+  if (!drag) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const tacheEl = el?.closest(".tache");
+  document.querySelectorAll(".tache.drop-before, .tache.drop-after")
+    .forEach((n) => n.classList.remove("drop-before", "drop-after"));
+  if (!tacheEl || tacheEl.dataset.tid === drag.id) {
+    drag.currentOverId = null;
+    return;
+  }
+  const rect = tacheEl.getBoundingClientRect();
+  const midY = rect.top + rect.height / 2;
+  const pos = e.clientY < midY ? "before" : "after";
+  tacheEl.classList.add(pos === "before" ? "drop-before" : "drop-after");
+  drag.currentOverId = tacheEl.dataset.tid;
+  drag.currentPos = pos;
+}
+
+function onPointerUp() {
+  document.removeEventListener("pointermove", onPointerMove);
+  if (!drag) return;
+  document.querySelectorAll(".tache.drop-before, .tache.drop-after")
+    .forEach((n) => n.classList.remove("drop-before", "drop-after"));
+  document.querySelectorAll(".handle.dragging")
+    .forEach((n) => n.classList.remove("dragging"));
+  if (drag.currentOverId) {
+    const from = state.taches.findIndex((t) => t.id === drag.id);
+    let to = state.taches.findIndex((t) => t.id === drag.currentOverId);
+    if (from !== -1 && to !== -1 && from !== to) {
+      const [moved] = state.taches.splice(from, 1);
+      if (from < to) to--;
+      if (drag.currentPos === "after") to++;
+      state.taches.splice(to, 0, moved);
+      sauvegardeAuto();
+    }
+  }
+  drag = null;
+  render();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  INCIDENTS
+ * ════════════════════════════════════════════════════════════════════════ */
+function openIncident() {
+  const ts = Date.now();
+  openModal(`
+    <div class="modal-title">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 9v4"/><path d="M12 17h.01"/>
+        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      </svg>
+      Déclarer un incident
+    </div>
+    <div class="modal-sub">
+      L'heure sera figée à la validation.
+      <span id="inc-live" style="display:block; margin-top:4px; font-family: var(--font-mono); font-weight: 600; color: var(--danger);">${fmtHMS(ts)}</span>
+    </div>
+    <textarea id="inc-text" class="danger-focus" placeholder="Description — ex : dégagement fumée PK 12+450, arrêt soudure, intervention pompiers…" autofocus></textarea>
+    <div class="modal-btns">
+      <button class="btn ghost" data-a="ko">Annuler</button>
+      <button class="btn danger" data-a="ok">Déclarer</button>
+    </div>
+  `);
+  // Heure live tant que la modale est ouverte
+  const liveEl = document.getElementById("inc-live");
+  const liveTimer = setInterval(() => {
+    if (!document.getElementById("inc-live")) { clearInterval(liveTimer); return; }
+    liveEl.textContent = fmtHMS(Date.now());
+  }, 1000);
+  modalHost.querySelector('[data-a="ko"]').onclick = () => { clearInterval(liveTimer); closeModal(); };
+  modalHost.querySelector('[data-a="ok"]').onclick = () => {
+    const txt = document.getElementById("inc-text").value.trim();
+    if (!txt) {
+      document.getElementById("inc-text").focus();
+      return;
+    }
+    state.incidents.push({ id: uid(), ts: Date.now(), texte: txt });
+    clearInterval(liveTimer); closeModal();
+    render(); sauvegardeAuto();
+    toast("Incident enregistré");
+  };
+}
+
+function majIncidentTs(id, hhmm) {
+  const i = state.incidents.find((x) => x.id === id);
+  if (!i) return;
+  const ts = hmToTs(hhmm, i.ts);
+  if (ts) { i.ts = ts; render(); sauvegardeAuto(); }
+}
+function majIncidentTexte(id, txt) {
+  const i = state.incidents.find((x) => x.id === id);
+  if (i) { i.texte = txt; sauvegardeAuto(); }
+}
+async function supprimerIncident(id) {
+  const ok = await confirmCustom(
+    "Supprimer cet incident ?",
+    "L'entrée sera définitivement effacée du journal.",
+    { labelOk: "Supprimer", danger: true }
+  );
+  if (!ok) return;
+  state.incidents = state.incidents.filter((x) => x.id !== id);
+  render();
+  sauvegardeAuto();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  ENCODAGE UTF-8 base64url safe (TextEncoder moderne)
+ * ════════════════════════════════════════════════════════════════════════ */
+function b64urlEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(s) {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  const padLen = b64.length % 4 ? 4 - (b64.length % 4) : 0;
+  const bin = atob(b64 + "=".repeat(padLen));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  PARTAGE
+ * ════════════════════════════════════════════════════════════════════════ */
+function construireLienPartage(incluChantier) {
+  const plan = {
+    c: incluChantier ? state.chantier : { nom: state.chantier.nom, date: state.chantier.date },
+    t: state.taches.map((x) => ({ n: x.nom })),
+    v: 1,
+  };
+  const b64 = b64urlEncode(JSON.stringify(plan));
+  const base = location.href.split("#")[0];
+  return base + "#plan=" + b64;
+}
+
+function decoderLienPartage() {
+  const h = location.hash;
+  const m = h.match(/#plan=([^&]+)/);
+  if (!m) return null;
+  try { return JSON.parse(b64urlDecode(m[1])); }
+  catch { return null; }
+}
+
+function openPartage() {
+  let incluChantier = true;
+  const render = () => {
+    const url = construireLienPartage(incluChantier);
+    openModal(`
+      <div class="modal-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+          <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+        Partager le plan
+      </div>
+      <div class="modal-sub">
+        L'équipe scanne ce QR code avec l'appareil photo du téléphone. Le plan s'ouvre pré-rempli, chacun fait son minuté de son côté.
+      </div>
+      <label class="toggle-row">
+        <input type="checkbox" id="chk-inclu" ${incluChantier ? "checked" : ""}>
+        Inclure les infos chantier (nom, ITC, lieu, responsable)
+      </label>
+      <div class="qr-wrap"><canvas id="qr-canvas" aria-label="QR code du plan"></canvas></div>
+      <div class="qr-url">${echap(url)}</div>
+      <div id="qr-msg"></div>
+      <div class="modal-btns">
+        <button class="btn ghost" data-a="close">Fermer</button>
+        <button class="btn ghost" data-a="copy">Copier le lien</button>
+        <button class="btn primary" data-a="download">Enregistrer QR</button>
+      </div>
+    `);
+    // Génère le QR
+    const canvas = document.getElementById("qr-canvas");
+    const msg = document.getElementById("qr-msg");
+    if (!QR.available()) {
+      canvas.style.display = "none";
+      msg.innerHTML = `<div class="tip warn">Module QR indisponible (connexion internet requise au premier chargement). Utilisez "Copier le lien" pour partager par SMS ou mail.</div>`;
+    } else if (!QR.draw(canvas, url, 6, 4)) {
+      canvas.style.display = "none";
+      msg.innerHTML = `<div class="tip warn">Plan trop volumineux pour un QR code. Utilisez "Copier le lien" et envoyez-le par SMS ou mail.</div>`;
+    } else {
+      canvas.style.display = "";
+      msg.innerHTML = "";
+    }
+
+    document.getElementById("chk-inclu").addEventListener("change", (e) => {
+      incluChantier = e.target.checked;
+      render();
+    });
+    modalHost.querySelector('[data-a="close"]').onclick = closeModal;
+    modalHost.querySelector('[data-a="copy"]').onclick = async () => {
+      const u = construireLienPartage(incluChantier);
+      try {
+        await navigator.clipboard.writeText(u);
+        toast("Lien copié");
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = u; document.body.appendChild(ta);
+        ta.select(); document.execCommand("copy");
+        document.body.removeChild(ta);
+        toast("Lien copié");
+      }
+    };
+    modalHost.querySelector('[data-a="download"]').onclick = () => {
+      const c = document.getElementById("qr-canvas");
+      if (!c || c.style.display === "none") {
+        toast("QR indisponible — utilisez le lien", { danger: true });
+        return;
+      }
+      c.toBlob((blob) => {
+        const urlBlob = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = urlBlob;
+        a.download = `plan-${state.chantier.date || "chantier"}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(urlBlob), 1000);
+      }, "image/png");
+    };
+  };
+  render();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  EXPORT / IMPORT JSON
+ * ════════════════════════════════════════════════════════════════════════ */
+function sauvegarder() {
+  const data = { ...state, v: 3, exportISO: new Date().toISOString() };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const safe = (s) => (s || "chantier").replace(/[^a-z0-9]/gi, "_").slice(0, 40);
+  a.href = url;
+  a.download = `Minute_${safe(state.chantier.nom)}_${state.chantier.date}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("Fichier exporté");
+}
+
+async function charger(e) {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const txt = await file.text();
+  let d;
+  try { d = JSON.parse(txt); }
+  catch { await alertCustom("Fichier invalide", "Le fichier n'est pas un JSON valide."); return; }
+
+  if (!d || typeof d !== "object") {
+    await alertCustom("Fichier invalide", "Format non reconnu."); return;
+  }
+
+  // Si un chantier est déjà en cours, proposer 3 actions
+  const aDesDonnees = state.taches.length > 0 || state.incidents.length > 0;
+  let action = "replace";
+  if (aDesDonnees) {
+    const fusion = await confirmCustom(
+      "Chantier en cours",
+      "Un chantier est déjà ouvert. Voulez-vous remplacer (les données actuelles seront perdues) ou ajouter les tâches du fichier à la fin de la liste ?",
+      { labelOk: "Remplacer", labelKo: "Ajouter à la fin" }
+    );
+    action = fusion ? "replace" : "append";
+  }
+
+  if (action === "replace") {
+    if (d.chantier) Object.assign(state.chantier, validateChantier(d.chantier));
+    state.taches = Array.isArray(d.taches) ? d.taches.map(validateTache).filter(Boolean) : [];
+    state.incidents = Array.isArray(d.incidents) ? d.incidents.map(validateIncident).filter(Boolean) : [];
+  } else {
+    const nouvelles = Array.isArray(d.taches) ? d.taches.map(validateTache).filter(Boolean) : [];
+    // Régénère les IDs pour éviter collisions
+    nouvelles.forEach((t) => { t.id = uid(); });
+    state.taches.push(...nouvelles);
+  }
+
+  renderFiche();
+  document.getElementById("brand-title").textContent =
+    state.chantier.nom || "Minuté de chantier";
+  document.getElementById("print-resp").textContent = state.chantier.resp || "";
+  render();
+  sauvegardeAuto();
+  toast(action === "replace" ? "Fichier chargé" : "Tâches ajoutées");
+}
+
+function imprimer() {
+  document.getElementById("print-date").textContent =
+    new Date().toLocaleString("fr-FR");
+  document.getElementById("print-resp").textContent = state.chantier.resp || "";
+  window.print();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  RENDU
+ * ════════════════════════════════════════════════════════════════════════ */
+function render() {
+  const cont = document.getElementById("taches");
+  if (state.taches.length === 0) {
+    cont.innerHTML = `
+      <div class="empty">
+        <p>Aucune tâche pour le moment.<br>
+        Préparez votre liste au bureau, ouvrez un fichier ou scannez un QR code.</p>
+      </div>`;
+  } else {
+    const prochaine = trouverProchaine();
+    const prochaineId = prochaine?.id;
+    cont.innerHTML = state.taches.map((t, i) =>
+      renderTache(t, i, t.id === prochaineId)
+    ).join("");
+
+    cont.querySelectorAll(".handle").forEach((h) => {
+      const id = h.dataset.tid;
+      h.addEventListener("pointerdown", (e) => onHandleDown(e, id));
+    });
+    // Délégation des actions par data-action (plus propre que onclick inline)
+    cont.querySelectorAll("[data-action]").forEach((el) => {
+      el.addEventListener("click", onActionClick);
+    });
+    cont.querySelectorAll(".tache-nom").forEach((el) => {
+      el.addEventListener("input", (e) => majTexte(e.target.dataset.tid, "nom", e.target.value));
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); e.target.blur(); }
+      });
+    });
+    cont.querySelectorAll(".tache-comm textarea").forEach((el) => {
+      el.addEventListener("input", (e) => {
+        majTexte(e.target.dataset.tid, "commentaire", e.target.value);
+        autoSize(e.target);
+      });
+      autoSize(el);
+    });
+    cont.querySelectorAll('input[type="time"][data-tid]').forEach((el) => {
+      el.addEventListener("change", (e) =>
+        setHeure(e.target.dataset.tid, e.target.dataset.champ, e.target.value)
+      );
+    });
+  }
+
+  const incS = document.getElementById("incidents-section");
+  if (state.incidents.length === 0) {
+    incS.style.display = "none";
+    incS.innerHTML = "";
+  } else {
+    incS.style.display = "block";
+    incS.innerHTML = `
+      <div class="incidents">
+        <div class="incidents-head">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 9v4"/><path d="M12 17h.01"/>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          </svg>
+          Incidents déclarés (${state.incidents.length})
+        </div>
+        ${state.incidents.map((inc) => `
+          <div class="incident-ligne">
+            <input class="incident-time" type="time" value="${fmtHM(inc.ts)}"
+                   data-iid="${inc.id}" aria-label="Heure de l'incident">
+            <input class="incident-texte" value="${echap(inc.texte)}"
+                   data-iid="${inc.id}" aria-label="Description de l'incident">
+            <button class="icon-btn danger" data-action="del-incident" data-iid="${inc.id}"
+                    aria-label="Supprimer cet incident">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        `).join("")}
+      </div>`;
+    incS.querySelectorAll(".incident-time").forEach((el) => {
+      el.addEventListener("change", (e) => majIncidentTs(e.target.dataset.iid, e.target.value));
+    });
+    incS.querySelectorAll(".incident-texte").forEach((el) => {
+      el.addEventListener("input", (e) => majIncidentTexte(e.target.dataset.iid, e.target.value));
+    });
+    incS.querySelectorAll('[data-action="del-incident"]').forEach((el) => {
+      el.addEventListener("click", (e) => supprimerIncident(e.currentTarget.dataset.iid));
+    });
+  }
+
+  majKpis();
+}
+
+function onActionClick(e) {
+  const el = e.currentTarget;
+  const action = el.dataset.action;
+  const id = el.dataset.tid;
+  switch (action) {
+    case "start":    return demarrer(id);
+    case "stop":     return terminer(id);
+    case "next":     terminer(id); setTimeout(demarrerProchaine, 50); return;
+    case "clear":    return effacerHoraires(id);
+    case "delete":   return supprimerTache(id);
+  }
+}
+
+function renderTache(t, i, estProchaine) {
+  const enCours = t.debut && !t.fin;
+  const finie   = !!t.fin;
+
+  let cls = "";
+  if (enCours) cls = "en-cours";
+  else if (finie) cls = "finie";
+  else if (estProchaine) cls = "prochaine";
+
+  let badgeClass = "attente", badgeLabel = "En attente";
+  if (finie) { badgeClass = "finie"; badgeLabel = "Terminée"; }
+  else if (enCours) { badgeClass = "encours"; badgeLabel = "En cours"; }
+  else if (estProchaine) { badgeClass = "prochaine"; badgeLabel = "Prochaine"; }
+
+  const dureeMs = (t.debut && t.fin) ? t.fin - t.debut : null;
+  const dureeNegative = dureeMs != null && dureeMs < 0;
+  const dureeTxt = dureeNegative ? "⚠ négative" : (dureeMs != null ? fmtDuree(dureeMs) : "");
+
+  const boutons = !t.debut
+    ? `<button class="btn primary" data-action="start" data-tid="${t.id}">
+         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+         Démarrer
+       </button>`
+    : enCours
+    ? `<button class="btn warn" data-action="stop" data-tid="${t.id}">
+         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16"/></svg>
+         Terminer
+       </button>
+       ${trouverProchaine() ? `
+         <button class="btn next" data-action="next" data-tid="${t.id}" title="Terminer + démarrer la suivante">
+           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+             <polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>
+           </svg>
+           + suivante
+         </button>
+       ` : ""}`
+    : `<button class="btn ghost" data-action="clear" data-tid="${t.id}">
+         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+           <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>
+         </svg>
+         Effacer les horaires
+       </button>`;
+
+  return `
+    <div class="tache ${cls}" data-tid="${t.id}">
+      <div class="tache-head">
+        <div class="handle" data-tid="${t.id}" aria-label="Glisser pour réordonner">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/>
+            <circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/>
+          </svg>
+        </div>
+        <div class="tache-num">${pad(i + 1)}</div>
+        <input class="tache-nom" value="${echap(t.nom)}"
+               placeholder="Nom de la tâche…"
+               data-tid="${t.id}"
+               aria-label="Nom de la tâche ${i + 1}">
+        <span class="badge ${badgeClass}">${badgeLabel}</span>
+        <button class="icon-btn danger" data-action="delete" data-tid="${t.id}"
+                aria-label="Supprimer la tâche ${i + 1}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="tache-cols">
+        <div class="col">
+          <div class="col-label">Début</div>
+          ${t.debut
+            ? `<input type="time" value="${fmtHM(t.debut)}" data-tid="${t.id}" data-champ="debut" aria-label="Heure de début">`
+            : `<div class="col-val empty">—:—</div>`}
+        </div>
+        <div class="col">
+          <div class="col-label">Fin</div>
+          ${t.fin
+            ? `<input type="time" value="${fmtHM(t.fin)}" data-tid="${t.id}" data-champ="fin" aria-label="Heure de fin">`
+            : `<div class="col-val empty">—:—</div>`}
+        </div>
+        <div class="col">
+          <div class="col-label">Durée</div>
+          <div class="col-val ${dureeNegative ? 'danger' : (dureeTxt ? 'accent' : 'empty')}">
+            ${dureeTxt || "—"}
+          </div>
+        </div>
+      </div>
+
+      ${dureeNegative ? `
+        <div class="tache-alert">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>
+          </svg>
+          Heure de fin antérieure à l'heure de début — vérifiez les horaires.
+        </div>
+      ` : ""}
+
+      <div class="tache-actions">${boutons}</div>
+
+      <div class="tache-comm">
+        <textarea placeholder="Commentaire (optionnel) — observations, mesures, anomalies…"
+                  data-tid="${t.id}"
+                  aria-label="Commentaire">${echap(t.commentaire)}</textarea>
+      </div>
+    </div>
+  `;
+}
+
+function autoSize(el) {
+  el.style.height = "auto";
+  el.style.height = Math.max(22, el.scrollHeight) + "px";
+}
+
+function majKpis() {
+  const total = state.taches.length;
+  const cours = state.taches.filter((t) => t.debut && !t.fin).length;
+  const finies = state.taches.filter((t) => t.fin).length;
+  const inc = state.incidents.length;
+  document.getElementById("k-total").textContent  = total;
+  document.getElementById("k-cours").textContent  = cours;
+  document.getElementById("k-finies").textContent = finies;
+  document.getElementById("k-inc").textContent    = inc;
+  document.getElementById("k-inc").className      = "kpi-val" + (inc > 0 ? " danger" : "");
+  document.getElementById("count-op").textContent =
+    total > 0 ? `${finies}/${total} terminées` : "";
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ *  INITIALISATION — Attache tous les handlers
+ * ════════════════════════════════════════════════════════════════════════ */
+async function init() {
+  const planRecu = decoderLienPartage();
+  if (planRecu) {
+    const tachesPlan = (planRecu.t || []).map((x) => ({
+      id: uid(), nom: (x && x.n) || "", debut: null, fin: null, commentaire: ""
+    }));
+    const nomPlan = planRecu.c?.nom || "chantier sans nom";
+    const ok = await confirmCustom(
+      "Plan reçu",
+      `Un plan pour « ${nomPlan} » (${tachesPlan.length} tâche${tachesPlan.length > 1 ? "s" : ""}) a été détecté. Le charger ? Les données locales actuelles seront remplacées.`,
+      { labelOk: "Charger", labelKo: "Ignorer" }
+    );
+    if (ok) {
+      if (planRecu.c) Object.assign(state.chantier, validateChantier(planRecu.c));
+      state.taches = tachesPlan;
+      state.incidents = [];
+      sauvegardeAuto();
+      toast("Plan chargé");
+    }
+    history.replaceState(null, "", location.pathname + location.search);
+  } else {
+    chargerAuto();
+  }
+
+  if (!state.chantier.date) {
+    state.chantier.date = new Date().toISOString().slice(0, 10);
+  }
+
+  renderFiche();
+  document.getElementById("brand-title").textContent =
+    state.chantier.nom || "Minuté de chantier";
+  document.getElementById("print-resp").textContent = state.chantier.resp || "";
+  render();
+  majSavedTag();
+
+  // Handlers globaux
+  document.getElementById("btn-incident").addEventListener("click", openIncident);
+  document.getElementById("btn-add").addEventListener("click", () => ajouterTache("", true));
+  document.getElementById("btn-share").addEventListener("click", openPartage);
+  document.getElementById("btn-save").addEventListener("click", sauvegarder);
+  document.getElementById("btn-open").addEventListener("click", () =>
+    document.getElementById("file-input").click()
+  );
+  document.getElementById("file-input").addEventListener("change", charger);
+  document.getElementById("btn-pdf").addEventListener("click", imprimer);
+
+  // Échap ferme la modale ouverte
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modalHost.style.display !== "none") closeModal();
+  });
+}
+
+init();
+
+})();
+</script>
+</body>
+</html>
